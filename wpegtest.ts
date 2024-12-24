@@ -29,8 +29,12 @@ export type ParsingError = {
     description: string
 }
 
-export type GrammarIface = {
+export type PrinterIface = {
+    print(s: string): void
+}
 
+export type GrammarIface = {
+    print(p: PrinterIface)
 }
 
 export type GrammarNodeIface = {
@@ -86,12 +90,13 @@ abstract class Located
 
 }
 
-class Printer
+class InternalPrinter
 {
-    private chunks: string[] = []
+    public constructor(private output: PrinterIface) {}
+
     public print(s: string): void
     {
-        this.chunks.push(s)
+        this.output.print(s)
     }
 
     public printEscaping(s: string): void
@@ -115,11 +120,6 @@ class Printer
         }
         return c
     }
-
-    public dumpToConsole(): void
-    {
-        console.log(this.chunks.join(""))
-    }
 }
 
 //   GGGG  RRRRRR    AAA   MM    MM MM    MM   AAA   RRRRRR  NN   NN  OOOOO  DDDDD   EEEEEEE  SSSSS  
@@ -141,7 +141,7 @@ abstract class GrammarNode extends Located implements GrammarNodeIface
     }
 
     public recursiveVisit(visitingFunction: (visitedNode: GrammarNode)=> void) { visitingFunction(this) }
-    public abstract print(p: Printer): void
+    public abstract print(p: InternalPrinter): void
     public abstract interpret(i: Interpreter): MemoInfo
 }
 
@@ -184,7 +184,7 @@ abstract class ChildrenGrammarNode extends GrammarNode
         this.children.forEach(visitingFunction)
     }
 
-    protected listPrint(p: Printer, separator: string): void
+    protected listPrint(p: InternalPrinter, separator: string): void
     {
         p.print("(")
         this.children.forEach((c, x) => {
@@ -203,7 +203,7 @@ abstract class ChildrenGrammarNode extends GrammarNode
 
 class GNEOF extends GrammarNode
 {
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print("EOF")
     }
@@ -218,7 +218,7 @@ class GNEpsilon extends GrammarNode
 {
     public constructor() { super(-1, -1) }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print("EPSILON")
     }
@@ -231,7 +231,7 @@ class GNEpsilon extends GrammarNode
 
 class GNAnyCharNotEOF extends GrammarNode
 {
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print("ANY")
     }
@@ -245,7 +245,7 @@ class GNAnyCharNotEOF extends GrammarNode
 
 class GNWhiteSpace extends GrammarNode
 {
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print("WS")
     }
@@ -261,7 +261,7 @@ class GNError extends GrammarNode
 {
     public constructor() { super(-1, -1) }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print("ERROR")
     }
@@ -278,7 +278,7 @@ class GNRuleUse extends GrammarNode
         super(from, to)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print(this.ruleName)
     }
@@ -299,7 +299,7 @@ class GNSet extends GrammarNode
         super(from, to)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         if(this.negated) { p.print("[^") }
         else             { p.print("[")  }
@@ -327,7 +327,7 @@ class GNString extends GrammarNode
         super(from, to)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print('"')
         p.printEscaping(this.terminals)
@@ -355,7 +355,7 @@ class GNConcat extends ChildrenGrammarNode
         if(children.length < 2) { throw new Error("Invalid concatenation children.")}
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         this.listPrint(p, " ")
     }
@@ -384,7 +384,7 @@ class GNBranch extends ChildrenGrammarNode
         if(children.length < 2) { throw new Error("Invalid branching children.")}
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         this.listPrint(p, " / ")
     }
@@ -414,7 +414,7 @@ class GNZeroOrMore extends ChildWithOptionalGrammarNode
         super(from, to, toRepeat, optSeparator)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         if(this.optional != null) {
             p.print("(")
@@ -448,7 +448,7 @@ class GNOneOrMore extends ChildWithOptionalGrammarNode
         super(from, to, toRepeat, optSeparator)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         if(this.optional != null) {
             p.print("(")
@@ -484,7 +484,7 @@ class GNZeroOrOne extends ChildGrammarNode
         super(from, to, expression)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         this.child.print(p)
         p.print("?")
@@ -504,7 +504,7 @@ class GNPredicate extends ChildGrammarNode {
         super(from, to, predicate)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print(this.assert ? "&" : "!")
         this.child.print(p)
@@ -525,7 +525,7 @@ class GNTag extends ChildGrammarNode {
         super(from, to, taggedExpression)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print(`<${this.tagName}>`)
         this.child.print(p)
@@ -547,7 +547,7 @@ class GNShowTerminals extends ChildGrammarNode
         super(from, to, expression)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print(`{`)
         this.child.print(p)
@@ -569,7 +569,7 @@ class GNCut extends ChildGrammarNode
         super(from, to, expression)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         this.child.print(p)
         p.print(`,`)
@@ -589,7 +589,7 @@ class GNBarrier extends ChildGrammarNode {
         super(from, to, expression)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         p.print(`#`)
         this.child.print(p)
@@ -609,7 +609,7 @@ class GNPermutation extends ChildrenGrammarNode
         super(from, to, permutationArray)
     }
 
-    public print(p: Printer): void
+    public print(p: InternalPrinter): void
     {
         this.listPrint(p, " ^ ")
     }
@@ -691,10 +691,11 @@ class Grammar implements GrammarIface
     }
 
 
-    public print(p: Printer) {
+    public print(p: PrinterIface) {
+        const internalPrinter = new InternalPrinter(p)
         this.rules.forEach((gn, name) => {
             p.print(`${name} = `)
-            gn.print(p)
+            gn.print(internalPrinter)
             p.print(";\n")
         })
     }
@@ -1304,22 +1305,3 @@ class Interpreter
         return result
     }
 }
-
-
-// TTTTTTT EEEEEEE  SSSSS  TTTTTTT 
-//   TTT   EE      SS        TTT   
-//   TTT   EEEEE    SSSSS    TTT   
-//   TTT   EE           SS   TTT   
-//   TTT   EEEEEEE  SSSSS    TTT   
-
-
-const p = new GrammarParser()
-
-if(p.parse('start := "test" ;')) {
-    const c = new Printer()
-    p.getGrammar().print(c)
-    c.dumpToConsole()
-} else {
-    console.log(p.getErrors().map(e => `${e.location}: ${e.description}`).join("\n"))
-}
-
