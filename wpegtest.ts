@@ -1127,7 +1127,6 @@ class GrammarParser
             this.skipWS()
             array.push(right)
         }
-        console.log(array.length)
         return array
     }
 

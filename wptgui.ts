@@ -458,7 +458,6 @@ function showErrors(errors: ParsingError[], elements: UserInterfaceElements, err
         errorDiv.classList.add("node")
         errorDiv.title = "Click to show location in input."
         errorDiv.onclick = () => {
-            console.log(error)
             if(errorInGrammar) { elements.hilightGrammar(error.location, error.location + 1, true) }
             else               { elements.hilightInput  (error.location, error.location + 1, true) }
         }
