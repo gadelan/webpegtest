@@ -5,20 +5,20 @@ import {
     GrammarNodeIface,
     MemoInfo,
     MemoMaps,
-    ParsingError,
+    LocatedError,
     parseGrammar,
     parseInput
-} from "./wpegtest.js"
+} from "./pegtest.js"
 
 
-const demo1grammar = `
+const tutorial1grammar = `
 //
 // Welcome to WebPEGTest, a parsing expression grammar (PEG) interpreter.
 //
 
-// This is the grammar definition file. The window below this one holds the input file. First, we define a grammar here,
-//  and then, we feed it an input to see how the grammar parses it. The results appear in the ouput and memo windows on
-//  the right side.
+// This is the grammar definition file. The window below this one contains the input file. First, we define a grammar
+//  here, and then, we feed it an input to see how the grammar parses it. The results appear in the ouput and memo
+//  windows on the right side.
 
 /* Both line comments (with //) and block comments (like this one) are available here, in the grammar definition file */
 
@@ -30,17 +30,26 @@ start = "a" myRule "c";
 
 // Quoted strings are required to appear in the input file. Unquoted identifiers are rule names. The expression of
 //  the corresponding rule is used where a rule name is written. The above axiom states that text parseable by the rule
-//  myRule must appear between "a" and "c" in the input. Let's define that rule.
+//  myRule must appear between "a" and "c" in the input.
+
+// Rule names, quoted strings and ranges (introduced in the second tutorial) are atomic parsing expressions or atoms.
+
+// Writing juxtaposed atoms forms a sequence expression. The above  "a" myRule "c"  is a sequence expression.
+//   An ordered choice expression is a list of sequence expressions separated by slashes. Let's define myRule using
+//   this kind of expression.
 
 myRule = "x" / "y";
 
-// Rules may have branches separated by a slash. If a branch does not match the input, the next branch is tried. This
-//  happens in order, from the left branch to the right one. This is a defining feature of PEGs and makes them
-//  unambiguous. In myRule first an "x" is tried and, if not found, then a "y" is tried. In the case all branches fail,
-//  the whole rule fails.
+// In a ordered choice expression, if a sequence does not match the input, the next sequence is tried. This happens in
+//  order, from the leftmost sequence to the rightmost one. This is a defining feature of PEGs and makes them
+//  unambiguous. In myRule first "x" is tried and, if not found in the input, "y" is tried. In the case all sequences
+//  fail, the whole rule fails.
 
-// When the parsing is successful, a ROOT node appears in the output window. So far we have no generated any child node
-//  for that root. We will do that in the second demo.
+// Ordered choice expressions can appear inside parentheses. For example, we could write the above two rules as one
+//   start = "a" ("x" / "y") "b"
+
+// When the parsing is successful, a ROOT node appears in the output window. So far we have not generated any child
+//  node for that root. We will do that in the second tutorial.
 
 // A PEG grammar stops when the axiom is parsed which may happen before reaching the end of file (EOF) of the input. In
 //  that case, a warning message appears after the root node. You can try that now writing something after "ayc" in the
@@ -61,19 +70,20 @@ myRule = "x" / "y";
 //  given a name composed of an M and a number. Some results depend on others which are listed and styled as hyperlinks.
 //  When clicked, the corresponding memoized result, input section and grammar expression are highlighted.
 
-// On the right side of the grammar window title, there are buttons to load and save the grammar as a file. Also the
-//  demo buttons are there.
+// On the right side of the grammar window title, there are buttons to load and save the grammar as a file. Also, the
+//  tutorial buttons are there.
 
-// On the right side of the input window title, there are buttons to load and sabe the input as a file.
+// On the right side of the input window title, there are buttons to load and sabe the input as a file. Also, the demo
+//  buttons are there.
 
 // On the right side of the output window title a checkbox shows or hide the AST of the rule expressions. This is not
 //  very useful, but shows the grammar is also parseable as a PEG. Clicking on the AST nodes, hillight the part
 //  of the grammar that generated it.
 `
 
-const demo1input = `ayc`
+const tutorial1input = `ayc`
 
-const demo2grammar = `
+const tutorial2grammar = `
 //
 // Predefined rules and escape sequences
 //
@@ -94,6 +104,7 @@ const demo2grammar = `
 // "\\[" will be the open bracket character.
 // "\\]" will be the close bracket character.
 // "\\-" will be the hyphen/minus character.
+// "\\"" will be the double quotation mark character.
 
 
 //
@@ -108,7 +119,9 @@ const demo2grammar = `
 alphanum = [a-zA-Z0-9] ;
 
 // A range may start with a caret after the opening bracket to negate the range. So, [^abc] will match any character
-//  but the letters a, b and c. End of file (EOF) is never matched by a range, even negated ones.
+//  but the letters a, b and c. End of file (EOF) is never matched by a range, even negated ones. Negated ranges are
+//  not really needed in PEGs. They can be simulated using the not-predicate (see the third tutorial). However they are
+//  included here for convenience.
 
 
 //
@@ -128,7 +141,7 @@ literal = {alphanum alphanum alphanum} ;
 
 // The second method of adding a node to the output is using a tag expression. This will create a node with the name
 //  of the tag. To tag an expression, surround it in an XML-like element. All nodes created by the expression inside
-//  the tag will appeard as child nodes of the created tag node. In this demo, the node "oneOrMore" contains a child
+//  the tag will appeard as child nodes of the created tag node. In this tutorial, the node "oneOrMore" contains a child
 //  tagged as "taggedRule" which has in turn three children a terminal "<abc" node, a "myTag" tagged node and a terminal
 //  ">" node. The next rule tags the expression "literal" and names it "myTag".
 
@@ -161,30 +174,57 @@ zeroOrOne := taggedRule? ;
 
 separated := taggedRule+ % "," ;
 
+// It is possible to repeat an EPSILON rule, leading to an infinite loop. WebPEGTest has an internal iteration
+//  counter which will stop too long repetitions.
+
 
 //
-//  Demo
+// Predicates
 //
 
-// The axiom of this demo is:
+// PEGs include two types of expressions to look ahead the input. The first one is the and-predicate which checks
+//  the input matches an expression. And-predicates just check, they don't consume the input so the next expression
+//  of the sequence will have to match it again. And-predicates are written using a prefix ampersand.
 
-start = "oom" oneOrMore "\\nzom" zeroOrMore "\\nzoo" zeroOrOne "\\nsep" separated ;
+// The second one is the not-predicate which checks the input does not match an expression. Nothing is consumed
+//  so the next expression of the sequence will have to match the input. Not-predicates are written using a prefix
+//  exclamation mark.
 
-// Change the input file to check how this demo grammar works.
+predicates := &(ANY ANY "a") !(ANY "a") [abcd]+;
+
+// In the above rule, the and-predicate checks there are three characters being the third one an "a". The not-predicate
+//  checks there are not two characters being the second an "a". Finally we match the input to characters "a" to "d"
+//  one or more times.
+
+// This rule will not match "ccccc" because the third character is not "a".
+// This rule will not match "aaaaa" because the second character is an "a".
+// This rule will match "bcadab", "ddaa", "ababab" and "dcab".
+
+
+//
+//  Axiom
+//
+
+// The axiom of this tutorial is:
+
+start = "oom" oneOrMore "\\nzom" zeroOrMore "\\nzoo" zeroOrOne "\\nsep" separated "\\npred" {predicates};
+
+// Change the input file to see how this grammar works.
 `
 
-const demo2input = `oom<abc xyz>
+const tutorial2input = `oom<abc xyz>
 zom
 zoo
-sep<123 PQR>,<g4g f5f>`
+sep<123 PQR>,<g4g f5f>
+predcdab`
 
-const demo3grammar = `
+const tutorial3grammar = `
 //
 // Permutations
 //
 
-// Because of the deterministic nature of PEGs, it is very difficult to express permutations. To alleviate this,
-//  permutation expressions are used. These are infix expressions with a caret as their operand.
+// Because of the ordered nature of PEGs, it is very difficult to express permutations. To alleviate this,
+//  permutation expressions are introduced. These are infix expressions with a caret as their operand.
 
 myPermutation := "a" ^ "b" ^ "c";
 
@@ -195,6 +235,11 @@ myPermutation := "a" ^ "b" ^ "c";
 myOptional := "p" . "q" . "r";
 
 // Both permutation and optional-lists accept the separator operator %
+
+// The permutation and optional-list operators are still eager and ordered. For instance, ("a" . "ab") "c"  fails
+//  to match "abc" because it matches "a" to the first option of the list, but then cannot match "b" neither to "ab",
+//  the second option, nor the next "c" of the sequence. On the other hand, ("ab" . "a") "c" is successful.
+
 
 
 //
@@ -238,6 +283,35 @@ done
 
 
 //
+//  Cut
+//
+
+// While parsing an ordered choice expression and reaching a point when we know the other sequences won't be accepted
+//  (or we don't want them to be accepted) the cut operation is used. When an ordered choice expression is cut, either
+//  it finishes the current sequence expression or fails. It won't try any other sequences. To cut an ordered choice
+//  expression, write a postfix comma.
+
+cut := "[", whitespaceInsensitive "]" / "("  whitespaceInsensitive ")" / "()" / <never>"[]"</never> ;
+
+// This rule will cut if it finds an opening square bracket, but not a round bracket. The last sequence will never
+//  be reached. Cuts only affect the ordered choice expression they appear in.
+
+
+//
+// Operator precedence
+//
+
+// The operators used in PEG expressions have the following precedence.
+
+// Top precedence. Atoms:   "strings"  ruleNames  [ranges]  (groups)
+//     Postfix operators:   oneOrMore+  zeroOrMore*  zeroOrOne?  cut,
+//      Prefix operators:   &andPredicate  !notPredicate
+//             Separator:   repeat % separator
+//             Sequences:   term1 term2
+//       Ordered options:   opt1 / opt2
+
+
+//
 //  Left recursion
 //
 
@@ -249,15 +323,66 @@ done
 //  recur will reject the rule. This means that even if a grammar has left recursion, as long as it is not used, it will
 //  be accepted.
 
-start := start "," whitespaceInsensitive / whitespaceInsensitive ;
+start := start "," cut / cut ;
 
 // Recursive rules are better expressed using repetition operations.  In the above case,
-// start := whitespaceInsensitive+ % ",";
+// start := cut+ % ",";
 `
 
-const demo3input = `abc=>q,bca=>rp`
+const tutorial3input = `[abc=>q],(bca=>rp),()`
 
 
+const demo1grammar = `
+// PEGs are quite powerful. They can parse non-context-free languages.
+
+start = &(ab "c") "a"+ bc EOF;
+ab    = "a" ab? "b";
+bc    = "b" bc? "c";
+`
+
+const demo1input = "aaaabbbbcccc"
+
+const demo2grammar = `
+// PEGs are greedy. If they can match a character they will do it.
+
+start = [ab]? [bc] [cd];
+
+// This will not match "bc" because the "b" is consumed by "[ab]?" and there is no "b" for "[bc].
+// In other parsers featuring unordered options like regular expressions, the "[ab]?" is skiped and "bc" is matched.
+`
+
+const demo2input = "bc"
+
+const demo3grammar = `
+// The grammar describing PEGs is a PEG itself.
+
+skipWS = (WS / comments)* ;
+comments = "//" (!"\\n" ANY)* "\\n" / "/*" (!"*/" ANY)* "*/";
+start = skipWS rule+ % skipWS skipWS EOF ;
+infixing skipWS do
+  rule := modifying / regular ;
+  modifying = modificationType identifier "do" regular+ "done" ;
+  regular = identifier ("=" / ":=") orderedOptions ";" ;
+  orderedOptions = sequence !"/" / <orderedOptions>sequence+ % "/"</orderedOptions> ;
+  sequence = separator !separator / <sequence>separator+</sequence>;
+  separator = permutation !"%" / <separator>permutation ("%" permutation)?</separator> ;
+  permutation = pre !("^" / ".") / <permutation>pre+ % "^"</permutation> / <optionals>pre+ % "."</optionals> ;
+  pre = <andPredicate>"&" pre</andPredicate> / <notPredicate>"!" pre</notPredicate> / post ;
+  post = atom !postfixOp / <postfix>atom {postfixOp*}</postfix>;
+  atom = quotedString / <ruleUse>identifier</ruleUse> / range / "(" orderedOptions ")" / "{" orderedOptions "}" / tagged;
+  tagged = "<" identifier ">" orderedOptions "</" identifier ">" ;
+done
+postfixOp = "+" / "*" / "?" / "," ;
+quotedString := {"\\"" stringChar* "\\""} ;
+stringChar = [^"\\\\] / escapedChar ;
+identifier = {[a-zA-Z] [a-zA-Z0-9]*} ;
+range := "[" "^"? rangeInterval* "]" ;
+rangeInterval = rangeChar ("-" rangeChar)? ;
+rangeChar = [^\\\\\\^\\-\\]] / escapedChar ; 
+escapedChar = "\\\\" ("\\\\" / "n" / "\\"" / "^" / "-" / "[" / "]" / "t" / "r") ;
+modificationType := "infixing" / "allfixing" / "prefixing" / "suffixing" / "appending" / "prepending" / "surrounding" ;
+`
+const demo3input = demo3grammar
 
 
 class TextAreaWithHilighting {
@@ -444,7 +569,7 @@ function showMemo(memo: MemoMaps, elements: UserInterfaceElements) {
     })
 }
 
-function showErrors(errors: ParsingError[], elements: UserInterfaceElements, errorInGrammar: boolean) {
+function showErrors(errors: LocatedError[], elements: UserInterfaceElements) {
     elements.clearOutput()
     if(errors.length == 0) {
         const errorDiv = document.createElement("div")
@@ -454,12 +579,16 @@ function showErrors(errors: ParsingError[], elements: UserInterfaceElements, err
     }
     errors.forEach(error => {
         const errorDiv = document.createElement("div")
-        errorDiv.textContent = "ERROR: " + error.description
+        errorDiv.textContent = (error.grammarNode == null ? "GRAMMAR ERROR: " : "ERROR: ") + error.message
         errorDiv.classList.add("node")
         errorDiv.title = "Click to show location in input."
         errorDiv.onclick = () => {
-            if(errorInGrammar) { elements.hilightGrammar(error.location, error.location + 1, true) }
-            else               { elements.hilightInput  (error.location, error.location + 1, true) }
+            if(error.grammarNode == null) { elements.hilightGrammar(error.from, error.to, true) }
+            else {
+                elements.hilightGrammarAndInput(
+                    error.grammarNode.from, error.grammarNode.to, error.from, error.to, true
+                )
+            }
         }
         elements.appendOutput(errorDiv)
     })
@@ -526,7 +655,7 @@ function hilightASTNode(node: ASTNode, elements: UserInterfaceElements): void {
     if(node.memoInfo != null) {
         elements.hilightMemoGrammarAndInput(node.memoInfo, true)
     } else {
-        elements.hilightGrammarAndInput(node.grammarNode.from, node.grammarNode.to, node.from, node.to)
+        elements.hilightGrammarAndInput(node.grammarNode.from, node.grammarNode.to, node.from, node.to, false)
     }    
 }
 
@@ -638,6 +767,7 @@ function escapeHTML(text: string): string
 class UserInterfaceElements {
     private grammarArea: TextAreaWithHilighting
     private inputArea: TextAreaWithHilighting
+    private tutorialButtons: HTMLButtonElement[]
     private demoButtons: HTMLButtonElement[]
     private outputElem: HTMLDivElement
     private memoElem: HTMLDivElement
@@ -658,12 +788,18 @@ class UserInterfaceElements {
         const inputSaveAs = check( "#isaveas", HTMLButtonElement )
         const inputLoad = check( "#iload", HTMLButtonElement )
 
+        this.tutorialButtons = [
+            check( "#tutorial1", HTMLButtonElement ),
+            check( "#tutorial2", HTMLButtonElement ),
+            check( "#tutorial3", HTMLButtonElement ),
+        ]
+    
         this.demoButtons = [
             check( "#demo1", HTMLButtonElement ),
             check( "#demo2", HTMLButtonElement ),
             check( "#demo3", HTMLButtonElement ),
         ]
-    
+
         this.grammarArea = new TextAreaWithHilighting(
             check( "#grammar", HTMLTextAreaElement ),
             check( "#grammarback", HTMLDivElement ),
@@ -695,9 +831,20 @@ class UserInterfaceElements {
         this.grammarArea.triggerOnInput()
     }
 
-    public initializeDemoButtons(...demoData: [grammar: string, input: string][]) {
+    public initializeTutorialButtons(...tutorialData: [grammar: string, input: string][]) {
+        this.tutorialButtons.forEach((button, index) => {
+            const data = tutorialData[index]
+            if(data == null) { return }
+            button.onclick = e => {
+                this.grammarArea.setText(data[0]);
+                this.inputArea.setText(data[1]);
+                this.triggerGrammarChangeEvent()
+            }
+        })
+    }
+    public initializeDemoButtons(...tutorialData: [grammar: string, input: string][]) {
         this.demoButtons.forEach((button, index) => {
-            const data = demoData[index]
+            const data = tutorialData[index]
             if(data == null) { return }
             button.onclick = e => {
                 this.grammarArea.setText(data[0]);
@@ -745,9 +892,11 @@ class UserInterfaceElements {
         this.hideMemoHilight()
     }
 
-    public hilightGrammarAndInput(grammarFrom: number, grammarTo: number, inputFrom: number, inputTo: number): void {
-        this.grammarArea.showHilight(grammarFrom, grammarTo, false)
-        this.inputArea.showHilight(inputFrom, inputTo, false)
+    public hilightGrammarAndInput(
+        grammarFrom: number, grammarTo: number, inputFrom: number, inputTo: number, userErrorColor: boolean
+    ): void {
+        this.grammarArea.showHilight(grammarFrom, grammarTo, userErrorColor)
+        this.inputArea.showHilight(inputFrom, inputTo, userErrorColor)
         this.hideMemoHilight()
     }
 
@@ -788,7 +937,7 @@ class UserInterfaceElements {
 function run() {
     const elements = new UserInterfaceElements()
 
-    let grammar: GrammarIface | ParsingError[] = []
+    let grammar: GrammarIface | LocatedError[] = []
     const se = showErrors
 
     elements.setInputChangeHandler(() => {
@@ -797,7 +946,7 @@ function run() {
         const result = parseInput(grammar, elements.getInputText())
         showMemo(result.memo, elements)
         if("error" in result) {
-            se([result.error], elements, false)
+            se([result.error], elements)
         } else {
             showAST(result.root, elements)
             const toLocation = result.parsedToLocation >= elements.getInputText().length ? -1 : result.parsedToLocation
@@ -812,7 +961,7 @@ function run() {
         elements.hideHilights()
         grammar = parseGrammar(elements.getGrammarText())
         if(Array.isArray(grammar)) {
-            se(grammar, elements, true); 
+            se(grammar, elements); 
             elements.clearMemos()
             return
         }
@@ -822,7 +971,17 @@ function run() {
     // The textareas may have content if the browser page was reloaded. Parse and interpret it.
     elements.triggerGrammarChangeEvent() 
 
-    elements.initializeDemoButtons([demo1grammar, demo1input], [demo2grammar, demo2input], [demo3grammar, demo3input])
+    elements.initializeTutorialButtons(
+        [tutorial1grammar, tutorial1input],
+        [tutorial2grammar, tutorial2input],
+        [tutorial3grammar, tutorial3input]
+    )
+
+    elements.initializeDemoButtons(
+        [demo1grammar, demo1input],
+        [demo2grammar, demo2input],
+        [demo3grammar, demo3input]
+    )
 }
 
 

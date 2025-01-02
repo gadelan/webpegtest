@@ -29,21 +29,31 @@ type IncompleteMemoInfoOk = IncompleteMemoInfoBase & {
     astNodes: ASTNode[]
     resultASTNode?: ASTNode
 }
-export type MemoInfoOK = IncompleteMemoInfoOk & { grammarNode: GrammarNodeIface }
 
 type IncompleteMemoInfoError = IncompleteMemoInfoBase & {
     error: string
 }
+type IncompleteMemoInfo = IncompleteMemoInfoOk | IncompleteMemoInfoError
 
+export type MemoInfoOK = IncompleteMemoInfoOk & { grammarNode: GrammarNodeIface }
 export type MemoInfoError = IncompleteMemoInfoError & { grammarNode: GrammarNodeIface }
 
 export type MemoInfo = MemoInfoOK | MemoInfoError
 
-type IncompleteMemoInfo = IncompleteMemoInfoOk | IncompleteMemoInfoError
 
-export type ParsingError = {
-    location: number
-    description: string
+
+export class LocatedError extends Error
+{
+    /** grammarNode is null when from/to refers to the grammar. Otherwise, they point to the input. */
+    constructor(
+        message: string,
+        public from: number,
+        public to: number,
+        public grammarNode: GrammarNodeIface | undefined,
+        options?: ErrorOptions
+    ) {
+        super(message, options)
+    }
 }
 
 export type PrinterIface = {
@@ -75,11 +85,11 @@ export type InputResult = {
     parsedToLocation: number
     memo: MemoMaps
 } | {
-    error: ParsingError
+    error: LocatedError
     memo: MemoMaps
 }
 
-export function parseGrammar(grammarCode: string): GrammarIface | ParsingError[]
+export function parseGrammar(grammarCode: string): GrammarIface | LocatedError[]
 {
     const parser = new GrammarParser()
     if(parser.parse(grammarCode)) {
@@ -91,7 +101,7 @@ export function parseGrammar(grammarCode: string): GrammarIface | ParsingError[]
 export function parseInput(grammar: GrammarIface, inputCode: string): InputResult
 {
     const interpreter = new Interpreter()
-    if(interpreter.parse(inputCode, grammar as Grammar)) {
+    if(interpreter.interpret(inputCode, grammar as Grammar)) {
         return {root: interpreter.rootAST, memo: interpreter.memo, parsedToLocation: interpreter.cursor }
     }
     return {error: interpreter.error, memo: interpreter.memo }
@@ -138,10 +148,12 @@ class InternalPrinter
             case '[':  return "\\["
             case ']':  return "\\]"
             case '-':  return "\\-"
+            case '"':  return '\\"'
         }
         return c
     }
 }
+
 
 //   GGGG  RRRRRR    AAA   MM    MM MM    MM   AAA   RRRRRR  NN   NN  OOOOO  DDDDD   EEEEEEE  SSSSS  
 //  GG  GG RR   RR  AAAAA  MMM  MMM MMM  MMM  AAAAA  RR   RR NNN  NN OO   OO DD  DD  EE      SS      
@@ -168,7 +180,7 @@ abstract class GrammarNode implements GrammarNodeIface
         visitingFunction(this)
     }
 
-    public insertSeparator(separator: GrammarNode, toPosition: number, idSuffix: string): GrammarNode | undefined {
+    public replaceSeparator(separator: GrammarNode, toPosition: number): GrammarNode | undefined {
         return // Fail by default
     }
 }
@@ -198,15 +210,9 @@ abstract class WithSeparatorGrammarNode extends GrammarNode
         super(from, to, id)
     }
 
-    public insertSeparator(separator: GrammarNode, toPosition: number, idSuffix: string): GrammarNode | undefined {
-        if(this.separator == null) {
-            this.separator = separator
-        } else {
-            this.separator = new GNConcat(
-                separator.from, toPosition, idSuffix, [separator, this.separator, separator]
-            )
-        }
-        (this as any).to = toPosition
+    public replaceSeparator(separator: GrammarNode, toPosition: number): GrammarNode | undefined {
+        this.separator = separator
+        ;(this as any).to = toPosition
         return this
     }
 
@@ -310,7 +316,7 @@ class GNEOF extends GrammarNode
 
     public interpret(i: Interpreter): IncompleteMemoInfo {
         if(i.atEOF()) { return i.createOKMemo(0, [], []) }
-        return i.createErrorMemo("Not EOF", [])
+        return i.createErrorMemo("Not at EOF", [])
     }
     public override getChildren(): ChildrenInfo {
         return {children: []}
@@ -413,13 +419,11 @@ class GNRuleUse extends GrammarNode
         const rule = i.getRule(this.ruleName)
         if(rule == null) { return i.createErrorMemo(`Rule '${this.ruleName}' not found.`, []) }
         const from = i.cursor
-        if(i.guardAgainstLeftRecursion(this.ruleName)) {
-            throw new Error("Left recursion detected. Rules: " + i.getUsedLeftRecursionRuleNames())
-        }
-        const result = i.parseNode(rule)
+        i.guardAgainstLeftRecursion(this.ruleName, this.from, this.to)
+        const result = i.interpretNode(rule)
         i.unguardAgainstLeftRecursion(this.ruleName)
+        i.guardAgainstInfiniteLoops(this.from, this.to)
         if("error" in result) {
-            const location = i.cursor
             i.cursor = from
             return i.createErrorMemo(`Rule '${this.ruleName}' failed. ${result.error}`, [result])
         }
@@ -451,12 +455,17 @@ class GNSet extends GrammarNode
         if(i.atEOF()) { return i.createErrorMemo("EOF reached", []) }
         const from = i.cursor
         const char = i.readChar()
-        if(this.set.has(char)) {
-            const astNode = i.createTerminal(from, this)
-            const memoInfo = i.createOKMemo(1, [astNode], [])
-            astNode.memoInfo = memoInfo as MemoInfo // parseNode() will set grammarNode property later.
-            return memoInfo
-        }
+        const inSet = this.set.has(char) != this.negated
+        if(inSet) {
+            i.leftRecurcursionNotPossible()
+            if(i.showTerminals > 0) {
+                const astNode = i.createTerminal(from, this)
+                const memoInfo = i.createOKMemo(1, [astNode], [])
+                astNode.memoInfo = memoInfo as MemoInfo // parseNode() will set grammarNode property later.
+                return memoInfo
+            }
+            return i.createOKMemo(1, [], [])
+    }
         i.cursor = from
         return i.createErrorMemo("Character not in set", [])
     }
@@ -483,27 +492,30 @@ class GNString extends GrammarNode
         const from = i.cursor
         for(const char of this.terminals) {
             if(char != i.readChar()) {
-                const location = i.cursor
                 i.cursor = from
                 return i.createErrorMemo(i.atEOF() ? "EOF reached" : `Mismatch of character ${char}`, [] )
             }
         }
-        const astNode = i.createTerminal(from, this)
-        const memoInfo = i.createOKMemo(this.terminals.length, [astNode], [])
-        astNode.memoInfo = memoInfo as MemoInfo // parseNode() will set grammarNode property later.
-        return memoInfo
-    }
+        i.leftRecurcursionNotPossible()
+        if(i.showTerminals > 0) {
+            const astNode = i.createTerminal(from, this)
+            const memoInfo = i.createOKMemo(this.terminals.length, [astNode], [])
+            astNode.memoInfo = memoInfo as MemoInfo // parseNode() will set grammarNode property later.
+            return memoInfo
+        }
+        return i.createOKMemo(this.terminals.length, [], [])
+}
 
     public override getChildren(): ChildrenInfo {
         return {children: []}
     }
 }
 
-class GNConcat extends ChildrenGrammarNode
+class GNSequence extends ChildrenGrammarNode
 {
     public constructor(from: number, to: number, idSuffix: string, children: GrammarNode[]) {
-        super(from, to, "Concat " + idSuffix, children)
-        if(children.length < 2) { throw new Error("Invalid concatenation children.")}
+        super(from, to, "Sequence " + idSuffix, children)
+        if(children.length < 2) { throw new LocatedError("Invalid sequence children.", from, to, undefined)}
     }
 
     public print(p: InternalPrinter): void
@@ -517,12 +529,13 @@ class GNConcat extends ChildrenGrammarNode
         let count = 0
         const memos: MemoInfo[] = []
         for(const child of this.children) {
-            const result = i.parseNode(child)
+            const result = i.interpretNode(child)
             memos.push(result)
             if("error" in result) {
+                const location = i.cursor
                 i.cursor = from
                 return i.createErrorMemo(
-                    `Concatenation failed after parsing ${count} member(s). ${result.error}`, memos
+                    `Sequence failed after parsing ${count} member(s). ${result.error}`, memos, location
                 )
             }
             ++count
@@ -531,11 +544,11 @@ class GNConcat extends ChildrenGrammarNode
     }
 }
 
-class GNBranch extends ChildrenGrammarNode
+class GNOrderedOptions extends ChildrenGrammarNode
 {
     public constructor(from: number, to: number, idSuffix: string, children: GrammarNode[]) {
         super(from, to, "Branch " + idSuffix, children)
-        if(children.length < 2) { throw new Error("Invalid branching children.")}
+        if(children.length < 2) { throw new LocatedError("Invalid ordered-options children.", from, to, undefined)}
     }
 
     public print(p: InternalPrinter): void
@@ -546,17 +559,24 @@ class GNBranch extends ChildrenGrammarNode
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
+        const oldCutting = i.cutting
+        i.cutting = false
         const memos: MemoInfo[] = []
         for(const child of this.children) {
-            const result = i.parseNode(child)
+            const result = i.interpretNode(child)
             memos.push(result)
-            if(!("error" in result)) { return i.createOKMemo(result.length, result.astNodes, memos) }
+            if(!("error" in result)) {
+                i.cutting = oldCutting
+                return i.createOKMemo(result.length, result.astNodes, memos)
+            }
             i.cursor = from
             if(i.cutting) {
+                i.cutting = oldCutting
                 return i.createErrorMemo("All branches failed before cut.", memos)
             }
         }
         i.cursor = from
+        i.cutting = oldCutting
         return i.createErrorMemo(`All branches failed.`, memos)
     }
 }
@@ -580,18 +600,19 @@ class GNZeroOrMore extends ChildWithSeparatorGrammarNode
         const memos: MemoInfo[] = []
         for(;;){
             const before = i.cursor
-            const result = i.parseNode(this.child)
+            const result = i.interpretNode(this.child)
             if("error" in result) {
                 i.cursor = before
                 break
             }
             memos.push(result)
+            i.guardAgainstInfiniteLoops(this.from, this.to)
 
             const beforeSeparator = i.cursor
             if(this.separator != null) {
-                const result = i.parseNode(this.separator)
-                memos.push(result)
+                const result = i.interpretNode(this.separator)
                 if("error" in result) { i.cursor = beforeSeparator; break }
+                memos.push(result)
             }
         }
         return i.createOKMemo(i.cursor - from, memos, memos)
@@ -614,7 +635,7 @@ class GNOneOrMore extends ChildWithSeparatorGrammarNode
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
-        const firstResult = i.parseNode(this.child)
+        const firstResult = i.interpretNode(this.child)
         if("error" in firstResult) {
             i.cursor = from
             return i.createErrorMemo("Mandatory match failed", [firstResult])
@@ -622,14 +643,13 @@ class GNOneOrMore extends ChildWithSeparatorGrammarNode
         const memos: MemoInfo[] = [firstResult]
         for(;;){
             const before = i.cursor
-            if(this.separator != null) {
-                const result = i.parseNode(this.separator)
-                memos.push(result)
-                if("error" in result) { i.cursor = before; break }
-            }
-            const result = i.parseNode(this.child)
+            const separatorResult = this.separator == null ? undefined : i.interpretNode(this.separator)
+            if(separatorResult != null && "error" in separatorResult) { i.cursor = before; break }
+            const result = i.interpretNode(this.child)
             if("error" in result) { i.cursor = before; break }
+            if(separatorResult != null) { memos.push(separatorResult) }
             memos.push(result)
+            i.guardAgainstInfiniteLoops(this.from, this.to)
         }
         return i.createOKMemo(i.cursor - from, memos, memos)
     }
@@ -650,7 +670,7 @@ class GNZeroOrOne extends ChildGrammarNode
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
-        const result = i.parseNode(this.child)
+        const result = i.interpretNode(this.child)
         if("error" in result) { i.cursor = from }
         return i.createOKMemo(i.cursor - from, [result], [result])
     }
@@ -659,7 +679,7 @@ class GNZeroOrOne extends ChildGrammarNode
 class GNPredicate extends ChildGrammarNode {
     public constructor(from: number, to: number, idSuffix: string, private assert: boolean, predicate: GrammarNode)
     {
-        super(from, to, "Predicate " + idSuffix, predicate)
+        super(from, to, (assert ? "And" : "Not") + "-predicate "+ idSuffix, predicate)
     }
 
     public print(p: InternalPrinter): void
@@ -671,7 +691,7 @@ class GNPredicate extends ChildGrammarNode {
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
-        const result = i.parseNode(this.child)
+        const result = i.interpretNode(this.child)
         const okResult = !("error" in result)
         i.cursor = from
         if(okResult == this.assert) { return i.createOKMemo(0, [], [result]) }
@@ -696,7 +716,7 @@ class GNTag extends ChildGrammarNode {
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
-        const result = i.parseNode(this.child)
+        const result = i.interpretNode(this.child)
         if("error" in result) {
             i.cursor = from
             return i.createErrorMemo("Tag expression failed", [result])
@@ -725,7 +745,7 @@ class GNShowTerminals extends ChildGrammarNode
     {
         const from = i.cursor
         ++i.showTerminals
-        const result = i.parseNode(this.child)
+        const result = i.interpretNode(this.child)
         --i.showTerminals
         if("error" in result) {
             i.cursor = from
@@ -750,37 +770,12 @@ class GNCut extends ChildGrammarNode
     public interpret(i: Interpreter): IncompleteMemoInfo
     {
         const from = i.cursor
-        const result = i.parseNode(this.child)
-        i.cutting = true
+        const result = i.interpretNode(this.child)
         if("error" in result) {
             i.cursor = from
             return i.createErrorMemo("Cut inner expression failed", [result])
         }
-        return i.createOKMemo(i.cursor - from, result.astNodes, [result])
-    }
-}
-
-class GNBarrier extends ChildGrammarNode {
-    public constructor(from: number, to: number, idSuffix: string, expression: GrammarNode)
-    {
-        super(from, to, "Barrier " + idSuffix, expression)
-    }
-
-    public print(p: InternalPrinter): void
-    {
-        p.print(`#`)
-        this.child.print(p)
-    }
-
-    public interpret(i: Interpreter): IncompleteMemoInfo
-    {
-        const from = i.cursor
-        const result = i.parseNode(this.child)
-        i.cutting = false
-        if("error" in result) {
-            i.cursor = from
-            return i.createErrorMemo("Barrier inner expression failed", [result])
-        }
+        i.cutting = true
         return i.createOKMemo(i.cursor - from, result.astNodes, [result])
     }
 }
@@ -814,13 +809,13 @@ class GNPermutation extends ChildrenWithSeparatorGrammarNode
         while(set.size > 0 && productive) {
             productive = false
             if(this.separator != null && set.size < this.children.length) {
-                const result = i.parseNode(this.separator)
+                const result = i.interpretNode(this.separator)
                 if("error" in result) { break; }
                 memos.push(result)
             }
             for(const option of this.children) {
                 if(!set.has(option)) { continue }
-                const result = i.parseNode(option)
+                const result = i.interpretNode(option)
                 if(!("error" in result)) {
                     set.delete(option)
                     productive = true
@@ -864,25 +859,27 @@ class Grammar implements GrammarIface
         return this.axiom == this.error ? null : this.axiom
     }
 
-    public checkRules(): Set<string> {
-        const result = new Set<string>
+    public checkRules(): LocatedError[] {
+        const result: LocatedError[] = []
+        const alreadyReported = new Set<string>()
         this.rules.forEach((node, name) => {
             node.recursiveVisit(n => {
-                if(n instanceof GNRuleUse && !this.rules.has(n.ruleName) && !specialRules.has(n.ruleName)) {
-                    result.add(n.ruleName)
+                if(n instanceof GNRuleUse
+                 && !this.rules.has(n.ruleName)
+                 && !specialRules.has(n.ruleName)
+                 && !alreadyReported.has(n.ruleName)
+                ) {
+                    alreadyReported.add(n.ruleName)
+                    result.push(new LocatedError(`Rule '${n.ruleName}' is not defined.`, n.from, n.to, undefined))
                 } 
             })
         })
         return result
     }
 
-    public optimizeNodes(): void {
-
-    }
-
-    public setRule(name: string, nameLocation: number, exp: GrammarNode): ParsingError | undefined {
+    public setRule(name: string, nameLocation: number, exp: GrammarNode): LocatedError | undefined {
         if(this.rules.has(name)) {
-            return {location: nameLocation, description:`Redefined rule '${name}'`}
+            return new LocatedError(`Redefined rule '${name}'`, nameLocation, nameLocation + name.length, undefined)
         }
         this.rules.set(name, exp)
     }
@@ -957,13 +954,13 @@ class GrammarParser
     private cursor: number = 0
     private grammar = new Grammar()
     private code = ""
-    private errors: ParsingError[] = []
+    private errors: LocatedError[] = []
     private nodeCount = 0
 
     public constructor() {}
 
     public getGrammar(): Grammar { return this.grammar }
-    public getErrors(): ParsingError[] { return this.errors }
+    public getErrors(): LocatedError[] { return this.errors }
 
     private uid(): string { return String(this.nodeCount++) }
 
@@ -981,13 +978,9 @@ class GrammarParser
             this.skipWS()
         }
         this.skipWS()
-        if(this.cursor != this.code.length) { return this.error("Garbage after last rule.") }
-        if(!this.grammar.initializeAxiom()) { return this.error(`Rule '${AXIOM_RULE_NAME}' is missing.`) }
-        const missingRules: Set<string> = this.grammar.checkRules()
-        if(missingRules.size != 0) {
-            return this.error("Missing rules: " + [...missingRules].map(r=>`'${r}'`).join(","))
-        }
-        this.grammar.optimizeNodes()
+        if(this.cursor != this.code.length) { this.error("Garbage after last rule.") }
+        if(!this.grammar.initializeAxiom()) { this.error(`Rule '${AXIOM_RULE_NAME}' is not defined.`) }
+        this.errors.push(...this.grammar.checkRules())
         return this.errors.length == 0
     }
 
@@ -995,8 +988,21 @@ class GrammarParser
     private parseRule(pre: boolean, inf: boolean, suf: boolean, infix: GrammarNode | null): void {
         const from = this.cursor
         const name = this.readIdentifier()
-        if(name == null) { this.error("Expecting rule name."); this.skipToAfterSemicolon(); return }
-        if(specialRules.has(name)) { this.error("Rule name is reserved."); this.skipToAfterSemicolon(); return }
+        if(name == null) {
+            this.error("Expecting rule name.");
+            this.skipToAfterSemicolon();
+            return
+        }
+        if(specialRules.has(name)) {
+            this.error("Rule name is reserved.");
+            this.skipToAfterSemicolon();
+            return
+        }
+        if(this.grammar.getRule(name) != null) {
+            this.error("Rule name already used.");
+            this.skipToAfterSemicolon();
+            return
+        }
 
         // Check if is a block of modified rules
         const ruleModifier = ruleModifierFromName(name)
@@ -1019,10 +1025,10 @@ class GrammarParser
         if(exp == null) { this.skipToAfterSemicolon(); return }
     
         if(infix != null) {
-            const concatArray = pre ? [infix, exp] : [exp]
-            if(suf) { concatArray.push(infix) }
-            if(concatArray.length == 1) { exp = concatArray[0] }
-            else { exp = new GNConcat(exp.from, exp.to, this.uid(), concatArray) }
+            const seqArray = pre ? [infix, exp] : [exp]
+            if(suf) { seqArray.push(infix) }
+            if(seqArray.length == 1) { exp = seqArray[0] }
+            else { exp = new GNSequence(exp.from, exp.to, this.uid(), seqArray) }
         }
 
         if(!this.matchTerminals(";", "Expecting rule terminator ;")) { this.skipToAfterSemicolon(); return }
@@ -1060,7 +1066,7 @@ class GrammarParser
 
         if(branchArray.length == 0) { return null }
         if(branchArray.length == 1) { return branchArray[0] }
-        return new GNBranch(begin, this.cursor, this.uid(), branchArray)
+        return new GNOrderedOptions(begin, this.cursor, this.uid(), branchArray)
     }
 
     // branch ::= element+
@@ -1070,16 +1076,16 @@ class GrammarParser
         const elem = this.parseElementExpression(infix)
         if(elem == null) { return }
         this.skipWS()
-        const concatArray = [elem]
+        const seqArray = [elem]
         while(this.isStartOfElementExpression()) {
-            if(infix != null) { concatArray.push(infix) }
+            if(infix != null) { seqArray.push(infix) }
             const elem = this.parseElementExpression(infix)
             if(elem == null) { return }
-            concatArray.push(elem)
+            seqArray.push(elem)
             this.skipWS()
         }
 
-        return concatArray.length == 1 ? concatArray[0] : new GNConcat(from, this.cursor, this.uid(), concatArray)
+        return seqArray.length == 1 ? seqArray[0] : new GNSequence(from, this.cursor, this.uid(), seqArray)
     }
 
     private isStartOfElementExpression(): boolean {
@@ -1107,10 +1113,10 @@ class GrammarParser
         if(right == null) { return }
 
         if(infix != null) {
-            right = new GNConcat(from, this.cursor, this.uid(), [infix, right, infix])
+            right = new GNSequence(from, this.cursor, this.uid(), [infix, right, infix])
         }
 
-        result = result.insertSeparator(right, this.cursor, this.uid())
+        result = result.replaceSeparator(right, this.cursor)
         if(result == null) { this.error("Separator applied to invalid expression."); return }
         return result
     }
@@ -1167,11 +1173,6 @@ class GrammarParser
             const pre = this.parsePrefixExpression(infix)
             if(pre == null) { return }
             return new GNPredicate(from, this.cursor, this.uid(), false, pre)
-        }
-        if(this.matchTerminals("#", false)) {
-            const pre = this.parsePrefixExpression(infix)
-            if(pre == null) { return }
-            return new GNBarrier(from, this.cursor, this.uid(), pre)
         }
 
         return this.parsePostfixExpression(infix)
@@ -1259,6 +1260,7 @@ class GrammarParser
             case '[':  ++this.cursor; return "["
             case ']':  ++this.cursor; return "]"
             case '-':  ++this.cursor; return "-"
+            case '"':  ++this.cursor; return '"'
         }
 
         return undefined
@@ -1365,7 +1367,7 @@ class GrammarParser
         while(this.cursor < this.code.length && isAlphanum(this.code[this.cursor])) {
             ++this.cursor
         }
-        if(this.cursor >= this.code.length) { return undefined }
+        if(start == this.cursor) { return undefined }
         return this.code.slice(start, this.cursor)
     }
 
@@ -1446,9 +1448,11 @@ class GrammarParser
         return false
     }
 
-    private error(description: string): false
+    private error(description: string, at?: number, length?: number): false
     {
-        this.errors.push({location: this.cursor, description})
+        if(at == null) { at = this. cursor }
+        if(length == null) { length = 1 }
+        this.errors.push( new LocatedError(description, at, at + length, undefined) )
         return false
     }
 }
@@ -1469,39 +1473,37 @@ class Interpreter
     public rootAST: ASTNode = {from: -1, to: -1, name: "ERROR", children: undefined, grammarNode: specialRules.get("WS") }
     public memo = new Map<number, Map<GrammarNode, MemoInfo>>()
     private grammar = new Grammar()
-    public error: ParsingError = {description: "none", location: 0}
+    public error = new LocatedError("None", 0, 0, undefined)
     public cursor = 0
     private code = ""
     public cutting = false
     public showTerminals = 0
     private memoCount = 0
     private usedLeftRecursionRules = new Set<string>()
+    private allowedLoopSteps = 10_000_000
 
 
-    public parse(code: string, grammar: Grammar): boolean
+    public interpret(code: string, grammar: Grammar): boolean
     {
         this.code = code
         this.grammar = grammar
         const axiom = grammar.getAxiom()
         if(axiom == null) {
-            this.error.description = "Invalid grammar"
-            this.error.location = 0
+            this.error = new LocatedError("Invalid grammar", 0, 0, undefined)
             return false
         }
-        this.guardAgainstLeftRecursion(AXIOM_RULE_NAME)
+        this.guardAgainstLeftRecursion(AXIOM_RULE_NAME, axiom.from, axiom.to)
         try {
-            const result = this.parseNode(axiom)
+            const result = this.interpretNode(axiom)
             if("error" in result) {
-                this.error.description = result.error
-                this.error.location = 0 // TODO
+                this.error = new LocatedError(result.error, result.position, result.position + 1, result.grammarNode)
                 return false
             }
             this.rootAST = this.createNonTerminal("ROOT", 0, result.astNodes, axiom)
             this.rootAST.memoInfo = result
             return true
         } catch(e) {
-            this.error.description = String(e)
-            this.error.location = 0 // TODO
+            this.error = e instanceof LocatedError ? e : new LocatedError(String(e), 0, 0, undefined)
             return false
         }
     }
@@ -1520,9 +1522,14 @@ class Interpreter
         return this.cursor < this.code.length && isWS(this.code[this.cursor])
     }
 
-    public guardAgainstLeftRecursion(ruleName: string): boolean
+    public guardAgainstLeftRecursion(ruleName: string, from: number, to: number): boolean
     {
-        if(this.usedLeftRecursionRules.has(ruleName)) { return true }
+        if(this.usedLeftRecursionRules.has(ruleName)) {
+            throw new LocatedError(
+                `Left recursion detected in rules: ${this.getUsedLeftRecursionRuleNames().join(", ")}`,
+                from, to, undefined
+            )
+        }
         this.usedLeftRecursionRules.add(ruleName)
         return false
     }
@@ -1530,6 +1537,18 @@ class Interpreter
     public unguardAgainstLeftRecursion(ruleName: string): void {
         this.usedLeftRecursionRules.delete(ruleName)
     }
+
+    public leftRecurcursionNotPossible(): void {
+        this.usedLeftRecursionRules.clear()
+    }
+
+
+    public guardAgainstInfiniteLoops(from: number, to: number): void {
+        if(--this.allowedLoopSteps <= 0) {
+            throw new LocatedError("Loop count exceeded limit.", from, to, undefined)
+        }
+    }
+
 
     public getUsedLeftRecursionRuleNames(): string[]
     {
@@ -1543,8 +1562,6 @@ class Interpreter
 
     public createTerminal(from: number, grammarNode: GrammarNode): ASTNode
     {
-        // A terminal was found. Left recursion is not possible any more.
-        this.usedLeftRecursionRules.clear()
         return { from, to: this.cursor, children:[], grammarNode }
     }
 
@@ -1552,7 +1569,7 @@ class Interpreter
         return this.grammar.getRule(ruleName) ?? specialRules.get(ruleName)
     }
 
-    public parseNode(gNode: GrammarNode): MemoInfo
+    public interpretNode(gNode: GrammarNode): MemoInfo
     {
         // Memoization
         let memoAtCursor = this.memo.get(this.cursor)
@@ -1587,7 +1604,7 @@ class Interpreter
         return { position: this.cursor - length, length, children, astNodes, id: this.memoCount++ }
     }
 
-    public createErrorMemo(error: string, children: MemoInfo[]): IncompleteMemoInfo {
-        return {position: this.cursor, error, children, id: this.memoCount++ }
+    public createErrorMemo(error: string, children: MemoInfo[], position?: number): IncompleteMemoInfo {
+        return {position: position ?? this.cursor, error, children, id: this.memoCount++ }
     }
 }
