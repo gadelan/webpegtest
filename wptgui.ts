@@ -347,8 +347,8 @@ const demo2grammar = `
 
 start = [ab]? [bc] [cd];
 
-// This will not match "bc" because the "b" is consumed by "[ab]?" and there is no "b" for "[bc].
-// In other parsers featuring unordered options like regular expressions, the "[ab]?" is skiped and "bc" is matched.
+// This will not match "bc" because the "b" is consumed by "[ab]?" and there is no "b" left for "[bc].
+// In other parsers featuring unordered options (like regular expressions), the "[ab]?" is skiped and "bc" is matched.
 `
 
 const demo2input = "bc"
